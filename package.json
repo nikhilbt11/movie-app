@@ -1,0 +1,21 @@
+{
+  "name": "movie-app",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev:api": "node --env-file=.env dev-server.js",
+    "dev:client": "npm --prefix client run dev",
+    "build": "npm --prefix client ci && npm --prefix client run build"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.500.0",
+    "@aws-sdk/s3-request-presigner": "^3.500.0",
+    "express": "^4.19.2",
+    "jsonwebtoken": "^9.0.2",
+    "mongoose": "^8.5.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

@@ -146,6 +146,37 @@ const Movie =
     )
   );
 
+const MovieInteraction =
+  mongoose.models.MovieInteraction ||
+  mongoose.model(
+    'MovieInteraction',
+    new mongoose.Schema(
+      {
+        movieId: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: 'Movie',
+          required: true,
+          unique: true,
+        },
+
+        comment: {
+          type: String,
+          default: '',
+          trim: true,
+          maxlength: 1000,
+        },
+
+        liked: {
+          type: Boolean,
+          default: false,
+        },
+      },
+      {
+        timestamps: true,
+      }
+    )
+  );
+
 // --------------------------------------------------
 // AUTH
 // --------------------------------------------------
@@ -300,6 +331,188 @@ app.get('/movies/:id', async (req, res) => {
 
     res.status(500).json({
       error: 'Failed to load movie.',
+    });
+  }
+});
+
+// Get shared movie interaction state
+app.get('/movies/:id/interaction', async (req, res) => {
+  try {
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(404).json({
+        error: 'Movie not found.',
+      });
+    }
+
+    const movie = await Movie.findById(req.params.id).select('_id');
+
+    if (!movie) {
+      return res.status(404).json({
+        error: 'Movie not found.',
+      });
+    }
+
+    const interaction = await MovieInteraction.findOne({
+      movieId: movie._id,
+    }).select('movieId comment liked');
+
+    res.json({
+      movieId: String(movie._id),
+      comment: interaction?.comment ?? '',
+      liked: interaction?.liked ?? false,
+    });
+  } catch (error) {
+    console.error('Failed to get movie interaction:', error);
+
+    res.status(500).json({
+      error: 'Failed to load movie interaction.',
+    });
+  }
+});
+
+// Update the one shared comment for a movie
+app.patch('/movies/:id/interaction/comment', async (req, res) => {
+  try {
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(404).json({
+        error: 'Movie not found.',
+      });
+    }
+
+    const movie = await Movie.findById(req.params.id).select('_id');
+
+    if (!movie) {
+      return res.status(404).json({
+        error: 'Movie not found.',
+      });
+    }
+
+    const { comment } = req.body || {};
+
+    if (typeof comment !== 'string' || comment.length > 1000) {
+      return res.status(400).json({
+        error: 'Comment must be a string of at most 1000 characters.',
+      });
+    }
+
+    const trimmedComment = comment.trim();
+    let interaction;
+
+    try {
+      interaction = await MovieInteraction.findOneAndUpdate(
+        { movieId: movie._id },
+        { $set: { comment: trimmedComment } },
+        {
+          new: true,
+          upsert: true,
+          setDefaultsOnInsert: true,
+          runValidators: true,
+        }
+      );
+    } catch (error) {
+      if (error?.code !== 11000) {
+        throw error;
+      }
+
+      interaction = await MovieInteraction.findOneAndUpdate(
+        { movieId: movie._id },
+        { $set: { comment: trimmedComment } },
+        {
+          new: true,
+          runValidators: true,
+        }
+      );
+    }
+
+    res.json({
+      movieId: String(movie._id),
+      comment: interaction.comment,
+      liked: interaction.liked,
+    });
+  } catch (error) {
+    console.error('Failed to update movie comment:', error);
+
+    res.status(500).json({
+      error: 'Failed to save comment.',
+    });
+  }
+});
+
+// Toggle the single shared thumbs-up state atomically
+app.patch('/movies/:id/interaction/like', async (req, res) => {
+  try {
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(404).json({
+        error: 'Movie not found.',
+      });
+    }
+
+    const movie = await Movie.findById(req.params.id).select('_id');
+
+    if (!movie) {
+      return res.status(404).json({
+        error: 'Movie not found.',
+      });
+    }
+
+    const movieId = movie._id;
+    const togglePipeline = [
+      {
+        $set: {
+          movieId: { $literal: movieId },
+          comment: { $ifNull: ['$comment', ''] },
+          liked: { $not: [{ $ifNull: ['$liked', false] }] },
+          createdAt: { $ifNull: ['$createdAt', '$$NOW'] },
+          updatedAt: '$$NOW',
+        },
+      },
+    ];
+
+    let interaction;
+
+    try {
+      interaction = await MovieInteraction.findOneAndUpdate(
+        { movieId },
+        togglePipeline,
+        {
+          new: true,
+          upsert: true,
+          timestamps: false,
+        }
+      );
+    } catch (error) {
+      if (error?.code !== 11000) {
+        throw error;
+      }
+
+      interaction = await MovieInteraction.findOneAndUpdate(
+        { movieId },
+        [
+          {
+            $set: {
+              liked: { $not: [{ $ifNull: ['$liked', false] }] },
+              comment: { $ifNull: ['$comment', ''] },
+              updatedAt: '$$NOW',
+            },
+          },
+        ],
+        {
+          new: true,
+          timestamps: false,
+        }
+      );
+    }
+
+    res.json({
+      movieId: String(movieId),
+      comment: interaction.comment,
+      liked: interaction.liked,
+    });
+  } catch (error) {
+    console.error('Failed to toggle movie like:', error);
+
+    res.status(500).json({
+      error: 'Failed to update movie like.',
     });
   }
 });
@@ -500,6 +713,10 @@ app.delete(
           error: 'Movie not found.',
         });
       }
+
+      await MovieInteraction.deleteOne({
+        movieId: movie._id,
+      });
 
       // Delete poster from R2.
       if (movie.r2PosterKey) {

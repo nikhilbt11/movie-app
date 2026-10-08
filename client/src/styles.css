@@ -22,6 +22,11 @@ video{width:100%;max-height:70vh;background:#000;border-radius:6px}
 .watch h2{margin:20px 0 6px;font-size:1.8rem}
 .watch p{color:var(--muted);max-width:70ch;white-space:pre-wrap}
 .note{color:var(--muted);font:.85rem system-ui,sans-serif;margin-top:10px}
+.interaction{margin-top:28px}
+.interaction h2{margin:0 0 14px;font-size:1.3rem}
+.interaction-like{margin-bottom:8px}
+.interaction-like.is-liked{background:#8fe0a0;color:#102b17}
+.interaction textarea{display:block;margin-bottom:14px}
 .box{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:20px;margin-bottom:28px}
 .box h2{margin-top:0}
 label{display:block;font:.9rem system-ui,sans-serif;color:var(--muted);margin:14px 0 4px}

@@ -136,6 +136,12 @@ const Movie =
           type: String,
         },
 
+        interactionRevision: {
+          type: Number,
+          default: 0,
+          select: false,
+        },
+
         size: {
           type: Number,
         },
@@ -145,6 +151,16 @@ const Movie =
       }
     )
   );
+
+const touchMovieForInteraction = async (movieId, session) => {
+  const result = await Movie.updateOne(
+    { _id: movieId },
+    { $inc: { interactionRevision: 1 } },
+    { session }
+  );
+
+  return result.matchedCount === 1;
+};
 
 const MovieInteraction =
   mongoose.models.MovieInteraction ||
@@ -308,6 +324,41 @@ app.get('/movies', async (req, res) => {
   }
 });
 
+// Get shared interaction state for every movie without per-movie requests
+app.get('/movies/interactions', async (req, res) => {
+  try {
+    const [movies, interactions] = await Promise.all([
+      Movie.find().select('_id').lean(),
+      MovieInteraction.find().select('movieId comment liked').lean(),
+    ]);
+    const interactionsByMovieId = new Map(
+      interactions.map((interaction) => [
+        String(interaction.movieId),
+        interaction,
+      ])
+    );
+
+    res.json(
+      movies.map((movie) => {
+        const movieId = String(movie._id);
+        const interaction = interactionsByMovieId.get(movieId);
+
+        return {
+          movieId,
+          comment: interaction?.comment ?? '',
+          liked: interaction?.liked ?? false,
+        };
+      })
+    );
+  } catch (error) {
+    console.error('Failed to get movie interactions:', error);
+
+    res.status(500).json({
+      error: 'Failed to load movie interactions.',
+    });
+  }
+});
+
 // Get one movie
 app.get('/movies/:id', async (req, res) => {
   try {
@@ -379,14 +430,6 @@ app.patch('/movies/:id/interaction/comment', async (req, res) => {
       });
     }
 
-    const movie = await Movie.findById(req.params.id).select('_id');
-
-    if (!movie) {
-      return res.status(404).json({
-        error: 'Movie not found.',
-      });
-    }
-
     const { comment } = req.body || {};
 
     if (typeof comment !== 'string' || comment.length > 1000) {
@@ -396,36 +439,43 @@ app.patch('/movies/:id/interaction/comment', async (req, res) => {
     }
 
     const trimmedComment = comment.trim();
+    const movieId = new mongoose.Types.ObjectId(req.params.id);
+    const session = await mongoose.startSession();
+    let movieExists = false;
     let interaction;
 
     try {
-      interaction = await MovieInteraction.findOneAndUpdate(
-        { movieId: movie._id },
-        { $set: { comment: trimmedComment } },
-        {
-          new: true,
-          upsert: true,
-          setDefaultsOnInsert: true,
-          runValidators: true,
-        }
-      );
-    } catch (error) {
-      if (error?.code !== 11000) {
-        throw error;
-      }
+      await session.withTransaction(async () => {
+        movieExists = await touchMovieForInteraction(movieId, session);
 
-      interaction = await MovieInteraction.findOneAndUpdate(
-        { movieId: movie._id },
-        { $set: { comment: trimmedComment } },
-        {
-          new: true,
-          runValidators: true,
+        if (!movieExists) {
+          return;
         }
-      );
+
+        interaction = await MovieInteraction.findOneAndUpdate(
+          { movieId },
+          { $set: { comment: trimmedComment } },
+          {
+            new: true,
+            upsert: true,
+            setDefaultsOnInsert: true,
+            runValidators: true,
+            session,
+          }
+        );
+      });
+    } finally {
+      await session.endSession();
+    }
+
+    if (!movieExists) {
+      return res.status(404).json({
+        error: 'Movie not found.',
+      });
     }
 
     res.json({
-      movieId: String(movie._id),
+      movieId: String(movieId),
       comment: interaction.comment,
       liked: interaction.liked,
     });
@@ -447,15 +497,7 @@ app.patch('/movies/:id/interaction/like', async (req, res) => {
       });
     }
 
-    const movie = await Movie.findById(req.params.id).select('_id');
-
-    if (!movie) {
-      return res.status(404).json({
-        error: 'Movie not found.',
-      });
-    }
-
-    const movieId = movie._id;
+    const movieId = new mongoose.Types.ObjectId(req.params.id);
     const togglePipeline = [
       {
         $set: {
@@ -468,39 +510,37 @@ app.patch('/movies/:id/interaction/like', async (req, res) => {
       },
     ];
 
+    const session = await mongoose.startSession();
+    let movieExists = false;
     let interaction;
 
     try {
-      interaction = await MovieInteraction.findOneAndUpdate(
-        { movieId },
-        togglePipeline,
-        {
-          new: true,
-          upsert: true,
-          timestamps: false,
-        }
-      );
-    } catch (error) {
-      if (error?.code !== 11000) {
-        throw error;
-      }
+      await session.withTransaction(async () => {
+        movieExists = await touchMovieForInteraction(movieId, session);
 
-      interaction = await MovieInteraction.findOneAndUpdate(
-        { movieId },
-        [
-          {
-            $set: {
-              liked: { $not: [{ $ifNull: ['$liked', false] }] },
-              comment: { $ifNull: ['$comment', ''] },
-              updatedAt: '$$NOW',
-            },
-          },
-        ],
-        {
-          new: true,
-          timestamps: false,
+        if (!movieExists) {
+          return;
         }
-      );
+
+        interaction = await MovieInteraction.findOneAndUpdate(
+          { movieId },
+          togglePipeline,
+          {
+            new: true,
+            upsert: true,
+            timestamps: false,
+            session,
+          }
+        );
+      });
+    } finally {
+      await session.endSession();
+    }
+
+    if (!movieExists) {
+      return res.status(404).json({
+        error: 'Movie not found.',
+      });
     }
 
     res.json({
@@ -703,20 +743,31 @@ app.delete(
         });
       }
 
-      const movie =
-        await Movie.findByIdAndDelete(
-          req.params.id
-        );
+      const session = await mongoose.startSession();
+      let movie;
+
+      try {
+        await session.withTransaction(async () => {
+          movie = await Movie.findOneAndDelete({
+            _id: req.params.id,
+          }).session(session);
+
+          if (movie) {
+            await MovieInteraction.deleteOne(
+              { movieId: movie._id },
+              { session }
+            );
+          }
+        });
+      } finally {
+        await session.endSession();
+      }
 
       if (!movie) {
         return res.status(404).json({
           error: 'Movie not found.',
         });
       }
-
-      await MovieInteraction.deleteOne({
-        movieId: movie._id,
-      });
 
       // Delete poster from R2.
       if (movie.r2PosterKey) {
